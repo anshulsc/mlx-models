@@ -339,3 +339,63 @@ def load_model(folder: str):
     weights = tree_unflatten(list(weights.items()))
     model.update(weights)
     return model, tokenizer
+
+if __name__ == "__main__":
+    parser = build_parser()
+    args = parser.parse_args()
+
+    np.random.seed(args.seed)
+
+    print("Loading pretrained model")
+    model, tokenizer = load_model(args.model)
+
+    # Freeze all layers except LoRA layers
+    model.freeze()
+
+    for layer in model.layers[-args.lora_layers:]:
+        layer.attention.wq = LoRALinear.from_linear(layer.attention.wq)
+        layer.attention.wv = LoRALinear.from_linear(layer.attention.wv)
+
+    num_params = sum(l.size for _, l in tree_flatten(model.parameters()))
+    print(f"Model has {num_params} parameters")
+    train_params = sum(l.size for _, l in tree_flatten(model.trainable_parameters()))
+    print(f"Model has {train_params} trainable parameters")
+
+    print("Loading datasets")
+    train_set, valid_set, test_set = load(args)
+
+    if args.resume_adapter_file is not None:
+        print(f"Loading adapter weights from {args.resume_adapter_file}")
+        model.load_weights(args.resume_adapter_file, strict=False)
+
+    if args.train:
+        print("Training")
+        optimizer = optim.Adam(learning_rate=args.learning_rate)
+
+        # train model 
+        train(model, train_set, valid_set, optimizer, loss, tokenizer, args)
+
+        # Save adapter weights
+        mx.savez(args.adapter_file, **dict(tree_flatten(model.parameters())))
+
+        # Load the LoRA adapter weigths which we assume 
+    if not Path(args.adapter_file).is_file():
+            raise ValueError(
+            f"Adapter file {args.adapter_file} missing. "
+            "Use --train to learn and save the adapters.npz."
+        )
+    model.load_weights(args.adapter_file, strict=False)
+
+    if args.test:
+        print("Testing")
+        test_loss = evaluate(
+            model, test_set, loss, tokenizer, args.batch_size, args.test_batches
+        )
+        test_ppl = math.exp(test_loss)
+        print(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}")
+
+
+    if args.prompt is not None:
+        print("Generating")
+        generate(model, args.prompt, tokenizer, args)
+
